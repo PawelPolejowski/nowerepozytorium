@@ -1,0 +1,363 @@
+
+// =====================================================================
+// KONFIGURACJA PAKIETÓW: podmień ID i dodaj kolejne pakiety według wzoru
+// =====================================================================
+function moje_pakiety_config() {
+    return array(
+        array(
+            'pakiet_id' => 21409,                  // ID pakietu A2 Bundle
+            'skladniki' => array( 21198, 20146 ),
+        ),
+        array(
+            'pakiet_id' => 20706,                  // ID pakietu B1 & B2 Speaking Booster 
+            'skladniki' => array( 20702, 20698 ),
+        ),
+        // kolejny pakiet: skopiuj blok array( ... ), i zmień ID
+    );
+}
+
+// =====================================================================
+// 1. Blokuj dodanie pojedynczego składnika, gdy jego pakiet jest w koszyku
+// =====================================================================
+add_filter( 'woocommerce_add_to_cart_validation', 'blokuj_skladniki_gdy_jest_pakiet', 10, 2 );
+
+function blokuj_skladniki_gdy_jest_pakiet( $passed, $product_id ) {
+    if ( ! WC()->cart ) {
+        return $passed;
+    }
+
+    $w_koszyku = array();
+    foreach ( WC()->cart->get_cart() as $item ) {
+        $w_koszyku[] = $item['product_id'];
+    }
+
+    foreach ( moje_pakiety_config() as $cfg ) {
+        if ( in_array( $product_id, $cfg['skladniki'] ) && in_array( $cfg['pakiet_id'], $w_koszyku ) ) {
+            wc_add_notice( 'Ten produkt jest już częścią pakietu, który masz w koszyku.', 'error', array( 'popup' => true ) );
+            return false;
+        }
+    }
+
+    return $passed;
+}
+
+// =====================================================================
+// 2. Komplet składników w koszyku => zamień na pakiet
+// =====================================================================
+add_action( 'woocommerce_add_to_cart', 'zamien_skladniki_na_pakiet', 20, 2 );
+
+function zamien_skladniki_na_pakiet( $cart_item_key, $product_id ) {
+    static $w_trakcie = false;
+    if ( $w_trakcie ) {
+        return;
+    }
+
+    $cart = WC()->cart;
+
+    // mapa: ID produktu => klucze pozycji w koszyku
+    $w_koszyku = array();
+    foreach ( $cart->get_cart() as $key => $item ) {
+        $w_koszyku[ $item['product_id'] ][] = $key;
+    }
+
+    foreach ( moje_pakiety_config() as $cfg ) {
+
+        if ( ! in_array( $product_id, $cfg['skladniki'] ) ) {
+            continue;
+        }
+
+        if ( isset( $w_koszyku[ $cfg['pakiet_id'] ] ) ) {
+            continue;
+        }
+
+        $komplet = true;
+        foreach ( $cfg['skladniki'] as $sk ) {
+            if ( ! isset( $w_koszyku[ $sk ] ) ) {
+                $komplet = false;
+                break;
+            }
+        }
+        if ( ! $komplet ) {
+            continue;
+        }
+
+        $w_trakcie = true;
+
+        // najpierw dodaj pakiet, dopiero potem usuń składniki
+        $dodano = $cart->add_to_cart( $cfg['pakiet_id'], 1 );
+
+        if ( $dodano ) {
+            foreach ( $cfg['skladniki'] as $sk ) {
+                foreach ( $w_koszyku[ $sk ] as $key ) {
+                    $cart->remove_cart_item( $key );
+                }
+            }
+            wc_add_notice( 'Dodałeś wszystkie produkty z pakietu, więc zastąpiliśmy je jednym pakietem.', 'success', array( 'popup' => true ) );
+        }
+
+        $w_trakcie = false;
+        break;
+    }
+}
+
+// =====================================================================
+// 3. Pod nazwą pakietu w koszyku: skład, ceny i oszczędność
+// =====================================================================
+add_filter( 'woocommerce_cart_item_name', 'pokaz_sklad_pakietu_w_koszyku', 10, 3 );
+
+function pokaz_sklad_pakietu_w_koszyku( $nazwa, $cart_item, $cart_item_key ) {
+
+    foreach ( moje_pakiety_config() as $cfg ) {
+
+        if ( $cart_item['product_id'] != $cfg['pakiet_id'] ) {
+            continue;
+        }
+
+        $suma  = 0;
+        $linie = '';
+
+        foreach ( $cfg['skladniki'] as $sk_id ) {
+            $sk = wc_get_product( $sk_id );
+            if ( ! $sk ) {
+                continue;
+            }
+            $cena  = (float) wc_get_price_to_display( $sk );
+            $suma += $cena;
+
+            $linie .= '<li>' . esc_html( $sk->get_name() ) . ' &ndash; ' . wc_price( $cena ) . '</li>';
+        }
+
+        if ( $linie === '' ) {
+            return $nazwa;
+        }
+
+        $cena_pakietu = (float) wc_get_price_to_display( $cart_item['data'] );
+        $oszczednosc  = $suma - $cena_pakietu;
+
+        $html  = '<div class="sklad-pakietu">';
+        $html .= '<small>Zawiera:</small>';
+        $html .= '<ul class="sklad-pakietu-lista">' . $linie . '</ul>';
+
+        if ( $oszczednosc > 0 ) {
+            $html .= '<strong class="sklad-pakietu-oszczednosc">Kupując zestaw oszczędzasz ' . wc_price( $oszczednosc ) . '</strong>';
+        }
+
+        $html .= '</div>';
+
+        return $nazwa . $html;
+    }
+
+    return $nazwa;
+}
+
+// =====================================================================
+// 4. Pływająca ikona koszyka na urządzeniach mobilnych
+// =====================================================================
+function plywajacy_koszyk_licznik( $ile ) {
+    return '<span class="plywajacy-koszyk-licznik" data-ile="' . (int) $ile . '">' . (int) $ile . '</span>';
+}
+
+add_action( 'wp_footer', 'plywajacy_koszyk_html' );
+
+function plywajacy_koszyk_html() {
+    if ( ! function_exists( 'WC' ) || ! WC()->cart || is_cart() || is_checkout() ) {
+        return;
+    }
+    ?>
+    <a href="<?php echo esc_url( wc_get_cart_url() ); ?>" class="plywajacy-koszyk" aria-label="Przejdź do koszyka">
+        <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="9" cy="21" r="1"></circle>
+            <circle cx="20" cy="21" r="1"></circle>
+            <path d="M1 1h4l2.7 13.4a2 2 0 0 0 2 1.6h9.7a2 2 0 0 0 2-1.6L23 6H6"></path>
+        </svg>
+        <?php echo plywajacy_koszyk_licznik( WC()->cart->get_cart_contents_count() ); ?>
+    </a>
+    <?php
+}
+
+add_filter( 'woocommerce_add_to_cart_fragments', 'plywajacy_koszyk_fragment' );
+
+function plywajacy_koszyk_fragment( $fragments ) {
+    $fragments['span.plywajacy-koszyk-licznik'] = plywajacy_koszyk_licznik( WC()->cart->get_cart_contents_count() );
+    return $fragments;
+}
+
+// =====================================================================
+// 5. Komunikaty pakietów jako popup
+// =====================================================================
+function popup_wyciagnij_komunikaty() {
+    if ( ! function_exists( 'WC' ) || ! WC()->session ) {
+        return array();
+    }
+
+    $wszystkie = wc_get_notices();
+    $wynik     = array();
+
+    foreach ( $wszystkie as $typ => $lista ) {
+        foreach ( $lista as $i => $n ) {
+            if ( is_array( $n ) && ! empty( $n['data']['popup'] ) ) {
+                $wynik[] = array( 'typ' => $typ, 'tekst' => $n['notice'] );
+                unset( $wszystkie[ $typ ][ $i ] );
+            }
+        }
+    }
+
+    if ( $wynik ) {
+        wc_set_notices( $wszystkie );
+    }
+
+    return $wynik;
+}
+
+function popup_dane_html( $komunikaty ) {
+    $html = '<div class="pakiet-popup-dane" hidden>';
+    foreach ( $komunikaty as $k ) {
+        $html .= '<p class="pakiet-popup-' . esc_attr( $k['typ'] ) . '">' . wp_kses_post( $k['tekst'] ) . '</p>';
+    }
+    return $html . '</div>';
+}
+
+add_action( 'template_redirect', 'popup_pobierz_komunikaty', 20 );
+
+function popup_pobierz_komunikaty() {
+    global $popup_komunikaty;
+    $popup_komunikaty = popup_wyciagnij_komunikaty();
+}
+
+add_filter( 'woocommerce_add_to_cart_fragments', 'popup_fragment' );
+
+function popup_fragment( $fragments ) {
+    $fragments['div.pakiet-popup-dane'] = popup_dane_html( popup_wyciagnij_komunikaty() );
+    return $fragments;
+}
+
+add_action( 'wp_footer', 'popup_wyswietl', 5 );
+
+function popup_wyswietl() {
+    global $popup_komunikaty;
+    $dane = ! empty( $popup_komunikaty ) ? $popup_komunikaty : array();
+
+    echo popup_dane_html( $dane );
+    ?>
+    <div class="pakiet-popup" hidden>
+        <div class="pakiet-popup-okno" role="dialog" aria-modal="true">
+            <div class="pakiet-popup-tresc"></div>
+            <div class="pakiet-popup-przyciski">
+                <a href="<?php echo esc_url( wc_get_cart_url() ); ?>" class="pakiet-popup-koszyk">Przejdź do koszyka</a>
+                <button type="button" class="pakiet-popup-zamknij">OK</button>
+            </div>
+        </div>
+    </div>
+    <script>
+    (function () {
+        var okno = document.querySelector('.pakiet-popup');
+        if (!okno) { return; }
+        var tresc = okno.querySelector('.pakiet-popup-tresc');
+
+        function pokaz() {
+            var dane = document.querySelector('.pakiet-popup-dane');
+            if (!dane || !dane.children.length) { return; }
+            tresc.innerHTML = dane.innerHTML;
+            dane.innerHTML = '';
+            okno.hidden = false;
+            okno.querySelector('.pakiet-popup-zamknij').focus();
+        }
+
+        function zamknij() { okno.hidden = true; }
+
+        okno.addEventListener('click', function (e) {
+            if (e.target === okno || e.target.closest('.pakiet-popup-zamknij')) { zamknij(); }
+        });
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') { zamknij(); }
+        });
+
+        pokaz();
+
+        if (window.jQuery) {
+            jQuery(document.body).on('added_to_cart', function () {
+                setTimeout(pokaz, 100);
+            });
+        }
+    })();
+    </script>
+    <?php
+}
+
+// 6. W koszyku: informacja, że produkt jest częścią zestawu + przycisk dodania zestawu
+add_filter( 'woocommerce_cart_item_name', 'pokaz_info_o_zestawie_w_koszyku', 20, 3 );
+
+function pokaz_info_o_zestawie_w_koszyku( $nazwa, $cart_item, $cart_item_key ) {
+
+    if ( ! is_cart() || ! WC()->cart ) {
+        return $nazwa;
+    }
+
+    // ID produktów, które są teraz w koszyku
+    $w_koszyku = array();
+    foreach ( WC()->cart->get_cart() as $item ) {
+        $w_koszyku[] = $item['product_id'];
+    }
+
+    $html = '';
+
+    foreach ( moje_pakiety_config() as $cfg ) {
+
+        // produkt nie należy do tego zestawu albo zestaw jest już w koszyku
+        if ( ! in_array( $cart_item['product_id'], $cfg['skladniki'] ) || in_array( $cfg['pakiet_id'], $w_koszyku ) ) {
+            continue;
+        }
+
+        $pakiet = wc_get_product( $cfg['pakiet_id'] );
+        if ( ! $pakiet || ! $pakiet->is_purchasable() || ! $pakiet->is_in_stock() ) {
+            continue;
+        }
+
+        // oszczędność: suma cen wszystkich składników minus cena zestawu
+        $suma = 0;
+        foreach ( $cfg['skladniki'] as $sk_id ) {
+            $sk = wc_get_product( $sk_id );
+            if ( $sk ) {
+                $suma += (float) wc_get_price_to_display( $sk );
+            }
+        }
+        $oszczednosc = $suma - (float) wc_get_price_to_display( $pakiet );
+
+        if ( $oszczednosc <= 0 ) {
+            continue;
+        }
+
+        $url = add_query_arg( 'add-to-cart', $cfg['pakiet_id'], wc_get_cart_url() );
+
+        $html .= '<div class="info-zestaw">';
+        $html .= '<div class="info-zestaw-tekst">';
+        $html .= 'Ten produkt jest częścią zestawu <strong>' . esc_html( $pakiet->get_name() ) . '</strong>, ';
+        $html .= 'dzięki któremu możesz zaoszczędzić <strong>' . wc_price( $oszczednosc ) . '</strong>.';
+        $html .= '</div>';
+        $html .= '<a href="' . esc_url( $url ) . '" class="button info-zestaw-przycisk">Dodaj cały zestaw</a>';
+        $html .= '</div>';
+    }
+
+    return $nazwa . $html;
+}
+
+// 7. Po dodaniu zestawu usuń z koszyka jego pojedyncze składniki
+add_action( 'woocommerce_add_to_cart', 'usun_skladniki_po_dodaniu_zestawu', 20, 2 );
+
+function usun_skladniki_po_dodaniu_zestawu( $cart_item_key, $product_id ) {
+
+    foreach ( moje_pakiety_config() as $cfg ) {
+
+        if ( $product_id != $cfg['pakiet_id'] ) {
+            continue;
+        }
+
+        foreach ( WC()->cart->get_cart() as $key => $item ) {
+            if ( in_array( $item['product_id'], $cfg['skladniki'] ) ) {
+                WC()->cart->remove_cart_item( $key );
+            }
+        }
+        break;
+    }
+}
+
